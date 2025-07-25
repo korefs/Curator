@@ -1,4 +1,4 @@
-# 📁 Telegram Storage Backend
+# 📁 Curator
 
 Backend C# (.NET 8) que utiliza o Telegram como sistema de armazenamento de arquivos, com PostgreSQL para autenticação e gerenciamento de usuários.
 
@@ -59,8 +59,6 @@ nano TelegramStorage/appsettings.json
   }
 }
 ```
-
-**🔒 Nunca commite o appsettings.json com chaves reais!**
 
 ### 3. 🐳 Executar com Docker (Recomendado)
 ```bash
