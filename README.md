@@ -190,9 +190,8 @@ TelegramStorage/
 
 ## 🚨 Limitações
 
-- **Tamanho máximo**: Ilimitado (chunks & reassemble)
 - **Tipos permitidos**: Configurável via `AllowedContentTypes`
-- **Armazenamento**: Dependente da disponibilidade do Telegram
+- **Armazenamento**: Dependente da disponibilidade do Telegram (ilimitado ?)
 - **Backup**: Arquivos ficam no chat/canal do Telegram
 
 ## 🤝 Contribuição
