@@ -11,6 +11,7 @@ public class TelegramStorageContext : DbContext
 
     public DbSet<User> Users { get; set; }
     public DbSet<FileRecord> FileRecords { get; set; }
+    public DbSet<FileChunk> FileChunks { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -35,6 +36,18 @@ public class TelegramStorageContext : DbContext
             entity.HasOne(f => f.User)
                   .WithMany(u => u.Files)
                   .HasForeignKey(f => f.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<FileChunk>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.FileRecordId, e.ChunkIndex }).IsUnique();
+            entity.HasIndex(e => e.TelegramFileId);
+            
+            entity.HasOne(c => c.FileRecord)
+                  .WithMany(f => f.Chunks)
+                  .HasForeignKey(c => c.FileRecordId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
     }

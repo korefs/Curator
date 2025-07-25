@@ -26,30 +26,120 @@ public class FileService : IFileService
         try
         {
             using var stream = file.OpenReadStream();
-            var telegramFileId = await _telegramService.UploadFileAsync(
-                stream, file.FileName, file.ContentType);
-
-            if (telegramFileId == null)
+            
+            // Verifica se precisa fazer chunking
+            if (FileChunkingService.ShouldChunk(file.Length))
             {
-                _logger.LogError("Failed to upload file to Telegram: {FileName}", file.FileName);
-                return null;
+                return await UploadLargeFileAsync(file, stream, userId);
+            }
+            else
+            {
+                return await UploadSmallFileAsync(file, stream, userId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error uploading file: {FileName}", file.FileName);
+            return null;
+        }
+    }
+
+    private async Task<FileResponseDto?> UploadSmallFileAsync(IFormFile file, Stream stream, int userId)
+    {
+        var telegramFileId = await _telegramService.UploadFileAsync(
+            stream, file.FileName, file.ContentType);
+
+        if (telegramFileId == null)
+        {
+            _logger.LogError("Failed to upload file to Telegram: {FileName}", file.FileName);
+            return null;
+        }
+
+        var fileRecord = new FileRecord
+        {
+            OriginalFileName = file.FileName,
+            ContentType = file.ContentType,
+            FileSize = file.Length,
+            TelegramFileId = telegramFileId,
+            UserId = userId,
+            UploadedAt = DateTime.UtcNow,
+            IsChunked = false,
+            TotalChunks = 1
+        };
+
+        _context.FileRecords.Add(fileRecord);
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("File uploaded successfully: {FileName}, Id: {Id}", 
+            file.FileName, fileRecord.Id);
+
+        return new FileResponseDto
+        {
+            Id = fileRecord.Id,
+            OriginalFileName = fileRecord.OriginalFileName,
+            ContentType = fileRecord.ContentType,
+            FileSize = fileRecord.FileSize,
+            UploadedAt = fileRecord.UploadedAt,
+            DownloadUrl = $"/api/files/{fileRecord.Id}/download"
+        };
+    }
+
+    private async Task<FileResponseDto?> UploadLargeFileAsync(IFormFile file, Stream stream, int userId)
+    {
+        var totalChunks = FileChunkingService.CalculateChunkCount(file.Length);
+        
+        // Cria o registro do arquivo
+        var fileRecord = new FileRecord
+        {
+            OriginalFileName = file.FileName,
+            ContentType = file.ContentType,
+            FileSize = file.Length,
+            TelegramFileId = string.Empty, // Será preenchido depois
+            UserId = userId,
+            UploadedAt = DateTime.UtcNow,
+            IsChunked = true,
+            TotalChunks = totalChunks
+        };
+
+        _context.FileRecords.Add(fileRecord);
+        await _context.SaveChangesAsync();
+
+        var chunks = new List<FileChunk>();
+        
+        try
+        {
+            // Upload dos chunks
+            await foreach (var (index, chunkData) in FileChunkingService.SplitStreamAsync(stream))
+            {
+                var chunkFileId = await _telegramService.UploadChunkAsync(
+                    chunkData, file.FileName, index);
+
+                if (chunkFileId == null)
+                {
+                    _logger.LogError("Failed to upload chunk {Index} for file: {FileName}", 
+                        index, file.FileName);
+                    return null;
+                }
+
+                var chunk = new FileChunk
+                {
+                    FileRecordId = fileRecord.Id,
+                    ChunkIndex = index,
+                    TelegramFileId = chunkFileId,
+                    ChunkSize = chunkData.Length,
+                    UploadedAt = DateTime.UtcNow
+                };
+
+                chunks.Add(chunk);
+                _context.FileChunks.Add(chunk);
             }
 
-            var fileRecord = new FileRecord
-            {
-                OriginalFileName = file.FileName,
-                ContentType = file.ContentType,
-                FileSize = file.Length,
-                TelegramFileId = telegramFileId,
-                UserId = userId,
-                UploadedAt = DateTime.UtcNow
-            };
-
-            _context.FileRecords.Add(fileRecord);
+            // Usa o FileId do primeiro chunk como referência principal
+            fileRecord.TelegramFileId = chunks.First().TelegramFileId;
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("File uploaded successfully: {FileName}, Id: {Id}", 
-                file.FileName, fileRecord.Id);
+            _logger.LogInformation("Large file uploaded successfully: {FileName}, Id: {Id}, Chunks: {ChunkCount}", 
+                file.FileName, fileRecord.Id, chunks.Count);
 
             return new FileResponseDto
             {
@@ -63,7 +153,12 @@ public class FileService : IFileService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error uploading file: {FileName}", file.FileName);
+            _logger.LogError(ex, "Error uploading large file chunks: {FileName}", file.FileName);
+            
+            // Cleanup em caso de erro
+            _context.FileRecords.Remove(fileRecord);
+            await _context.SaveChangesAsync();
+            
             return null;
         }
     }
@@ -73,6 +168,7 @@ public class FileService : IFileService
         try
         {
             var fileRecord = await _context.FileRecords
+                .Include(f => f.Chunks)
                 .FirstOrDefaultAsync(f => f.Id == fileId && f.UserId == userId && !f.IsDeleted);
 
             if (fileRecord == null)
@@ -81,18 +177,83 @@ public class FileService : IFileService
                 return null;
             }
 
-            var stream = await _telegramService.DownloadFileAsync(fileRecord.TelegramFileId);
-            if (stream == null)
+            if (!fileRecord.IsChunked)
             {
-                _logger.LogError("Failed to download file from Telegram: {FileId}", fileId);
-                return null;
+                // Arquivo pequeno - download direto
+                var stream = await _telegramService.DownloadFileAsync(fileRecord.TelegramFileId);
+                if (stream == null)
+                {
+                    _logger.LogError("Failed to download file from Telegram: {FileId}", fileId);
+                    return null;
+                }
+                return (stream, fileRecord.OriginalFileName, fileRecord.ContentType);
             }
-
-            return (stream, fileRecord.OriginalFileName, fileRecord.ContentType);
+            else
+            {
+                // Arquivo grande - download e reassembly dos chunks
+                return await DownloadLargeFileAsync(fileRecord);
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error downloading file: {FileId}", fileId);
+            return null;
+        }
+    }
+
+    private async Task<(Stream? fileStream, string fileName, string contentType)?> DownloadLargeFileAsync(FileRecord fileRecord)
+    {
+        try
+        {
+            var orderedChunks = fileRecord.Chunks.OrderBy(c => c.ChunkIndex).ToList();
+            
+            if (orderedChunks.Count != fileRecord.TotalChunks)
+            {
+                _logger.LogError("Missing chunks for file: {FileId}. Expected: {Expected}, Found: {Found}", 
+                    fileRecord.Id, fileRecord.TotalChunks, orderedChunks.Count);
+                return null;
+            }
+
+            var chunkStreams = new List<Stream>();
+            
+            try
+            {
+                // Download de todos os chunks
+                foreach (var chunk in orderedChunks)
+                {
+                    var chunkStream = await _telegramService.DownloadFileAsync(chunk.TelegramFileId);
+                    if (chunkStream == null)
+                    {
+                        _logger.LogError("Failed to download chunk {Index} for file: {FileId}", 
+                            chunk.ChunkIndex, fileRecord.Id);
+                        
+                        // Cleanup streams já baixados
+                        foreach (var s in chunkStreams)
+                            s.Dispose();
+                        
+                        return null;
+                    }
+                    chunkStreams.Add(chunkStream);
+                }
+
+                // Reassemble dos chunks
+                var reassembledStream = await FileChunkingService.ReassembleChunksAsync(chunkStreams);
+                
+                _logger.LogInformation("Large file reassembled successfully: {FileId}, Chunks: {ChunkCount}", 
+                    fileRecord.Id, chunkStreams.Count);
+
+                return (reassembledStream, fileRecord.OriginalFileName, fileRecord.ContentType);
+            }
+            finally
+            {
+                // Cleanup dos chunk streams
+                foreach (var stream in chunkStreams)
+                    stream.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error downloading large file: {FileId}", fileRecord.Id);
             return null;
         }
     }
@@ -102,6 +263,7 @@ public class FileService : IFileService
         try
         {
             var fileRecord = await _context.FileRecords
+                .Include(f => f.Chunks)
                 .FirstOrDefaultAsync(f => f.Id == fileId && f.UserId == userId && !f.IsDeleted);
 
             if (fileRecord == null)
@@ -113,9 +275,24 @@ public class FileService : IFileService
             fileRecord.IsDeleted = true;
             await _context.SaveChangesAsync();
 
+            // Delete do arquivo principal
             await _telegramService.DeleteFileAsync(fileRecord.TelegramFileId, fileRecord.TelegramMessageId);
 
-            _logger.LogInformation("File deleted successfully: {FileId}", fileId);
+            // Delete dos chunks se existirem
+            if (fileRecord.IsChunked && fileRecord.Chunks.Any())
+            {
+                foreach (var chunk in fileRecord.Chunks)
+                {
+                    await _telegramService.DeleteFileAsync(chunk.TelegramFileId, chunk.TelegramMessageId);
+                }
+                _logger.LogInformation("File and {ChunkCount} chunks deleted successfully: {FileId}", 
+                    fileRecord.Chunks.Count, fileId);
+            }
+            else
+            {
+                _logger.LogInformation("File deleted successfully: {FileId}", fileId);
+            }
+            
             return true;
         }
         catch (Exception ex)

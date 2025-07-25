@@ -27,4 +27,9 @@ public class FileRecord
     
     public int UserId { get; set; }
     public User User { get; set; } = null!;
+    
+    public bool IsChunked { get; set; } = false;
+    public int TotalChunks { get; set; } = 1;
+    
+    public ICollection<FileChunk> Chunks { get; set; } = new List<FileChunk>();
 }

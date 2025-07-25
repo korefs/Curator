@@ -38,28 +38,29 @@ Backend C# (.NET 8) que utiliza o Telegram como sistema de armazenamento de arqu
 5. Obtenha o **Chat ID** (use bots como @userinfobot)
 
 ### 2. 📝 Configurar appsettings.json
+
+```bash
+# Copiar o template
+cp TelegramStorage/appsettings.Example.json TelegramStorage/appsettings.json
+
+# Editar com suas configurações
+nano TelegramStorage/appsettings.json
+```
+
+**Configurações necessárias:**
 ```json
 {
-  "ConnectionStrings": {
-    "DefaultConnection": "Host=localhost;Database=telegram_storage;Username=postgres;Password=password"
-  },
   "TelegramSettings": {
-    "BotToken": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    "StorageChatId": "-1001234567890",
-    "MaxFileSizeBytes": 52428800,
-    "AllowedContentTypes": [
-      "image/jpeg", "image/png", "image/gif", 
-      "application/pdf", "text/plain", "application/zip"
-    ]
+    "BotToken": "SEU_TOKEN_DO_BOT_AQUI",
+    "StorageChatId": "SEU_CHAT_ID_AQUI"
   },
   "JwtSettings": {
-    "SecretKey": "SuaChaveSecretaDePeloMenos32CaracteresParaSeguranca",
-    "Issuer": "TelegramStorage",
-    "Audience": "TelegramStorageUsers",
-    "ExpirationInHours": 24
+    "SecretKey": "SuaChaveSecretaDePeloMenos32CaracteresParaSeguranca"
   }
 }
 ```
+
+**🔒 Nunca commite o appsettings.json com chaves reais!**
 
 ### 3. 🐳 Executar com Docker (Recomendado)
 ```bash
@@ -173,7 +174,6 @@ TelegramStorage/
 
 - **JWT Authentication** com chaves seguras
 - **Validação** de tipos de arquivo permitidos
-- **Limite** de tamanho de arquivo (50MB padrão)
 - **Middleware** de tratamento de exceções
 - **Logs** detalhados para auditoria
 - **Sanitização** de dados de entrada
@@ -192,7 +192,7 @@ TelegramStorage/
 
 ## 🚨 Limitações
 
-- **Tamanho máximo**: 50MB por arquivo (limite do Telegram)
+- **Tamanho máximo**: Ilimitado (chunks & reassemble)
 - **Tipos permitidos**: Configurável via `AllowedContentTypes`
 - **Armazenamento**: Dependente da disponibilidade do Telegram
 - **Backup**: Arquivos ficam no chat/canal do Telegram

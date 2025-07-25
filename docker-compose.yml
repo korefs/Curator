@@ -14,14 +14,13 @@ services:
     restart: unless-stopped
 
   telegram-storage:
-    build:
-      context: ./TelegramStorage
-      dockerfile: Dockerfile
+    image: telegram-storage:latest
     ports:
       - "8080:8080"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ConnectionStrings__DefaultConnection=Host=postgres;Database=telegram_storage;Username=postgres;Password=password
+      - ASPNETCORE_SERVER_KESTREL__LIMITS__MAXREQUESTBODYSIZE=-1
     depends_on:
       - postgres
     restart: unless-stopped

@@ -21,12 +21,6 @@ public class TelegramService : ITelegramService
     {
         try
         {
-            if (fileStream.Length > _telegramSettings.MaxFileSizeBytes)
-            {
-                _logger.LogWarning("File size exceeds limit: {Size} bytes", fileStream.Length);
-                return null;
-            }
-
             if (_telegramSettings.AllowedContentTypes.Length > 0 && 
                 !_telegramSettings.AllowedContentTypes.Contains(contentType))
             {
@@ -53,6 +47,36 @@ public class TelegramService : ITelegramService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error uploading file to Telegram: {FileName}", fileName);
+            return null;
+        }
+    }
+
+    public async Task<string?> UploadChunkAsync(byte[] chunkData, string fileName, int chunkIndex)
+    {
+        try
+        {
+            using var chunkStream = new MemoryStream(chunkData);
+            var chunkFileName = $"{fileName}.part{chunkIndex:D4}";
+            
+            var inputFile = InputFile.FromStream(chunkStream, chunkFileName);
+            var message = await _botClient.SendDocumentAsync(
+                chatId: _telegramSettings.StorageChatId,
+                document: inputFile,
+                caption: $"📦 Chunk {chunkIndex + 1} of {fileName}\n🕒 {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC"
+            );
+
+            if (message.Document != null)
+            {
+                _logger.LogInformation("Chunk uploaded successfully: {FileName}, Chunk: {ChunkIndex}, FileId: {FileId}", 
+                    fileName, chunkIndex, message.Document.FileId);
+                return message.Document.FileId;
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error uploading chunk to Telegram: {FileName}, Chunk: {ChunkIndex}", fileName, chunkIndex);
             return null;
         }
     }

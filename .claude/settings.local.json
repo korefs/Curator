@@ -5,7 +5,19 @@
       "Bash(mkdir:*)",
       "Bash(dotnet restore:*)",
       "Bash(dotnet ef migrations:*)",
-      "Bash(dotnet build)"
+      "Bash(dotnet build)",
+      "Bash(dotnet build:*)",
+      "Bash(chmod:*)",
+      "Bash(./deploy.sh)",
+      "Bash(docker-compose logs:*)",
+      "Bash(curl:*)",
+      "Bash(docker-compose exec postgres psql:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker build:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)"
     ],
     "deny": []
   }
