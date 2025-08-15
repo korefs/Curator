@@ -1,9 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Text;
-using TelegramStorage.Configuration;
 using TelegramStorage.Data;
 using TelegramStorage.DTOs;
 using TelegramStorage.Models;
@@ -14,52 +9,125 @@ namespace TelegramStorage.Services;
 public class AuthService : IAuthService
 {
     private readonly TelegramStorageContext _context;
-    private readonly JwtSettings _jwtSettings;
+    private readonly IJwtService _jwtService;
+    private readonly IInputSanitizationService _inputSanitizationService;
+    private readonly ILogger<AuthService> _logger;
 
-    public AuthService(TelegramStorageContext context, JwtSettings jwtSettings)
+    public AuthService(
+        TelegramStorageContext context, 
+        IJwtService jwtService,
+        IInputSanitizationService inputSanitizationService,
+        ILogger<AuthService> logger)
     {
         _context = context;
-        _jwtSettings = jwtSettings;
+        _jwtService = jwtService;
+        _inputSanitizationService = inputSanitizationService;
+        _logger = logger;
     }
 
     public async Task<string?> LoginAsync(LoginDto loginDto)
     {
-        var user = await _context.Users
-            .FirstOrDefaultAsync(u => u.Email == loginDto.Email && u.IsActive);
-
-        if (user == null || !BCrypt.Net.BCrypt.Verify(loginDto.Password, user.PasswordHash))
+        try
         {
+            // Sanitize and validate input
+            var sanitizedEmail = _inputSanitizationService.SanitizeEmail(loginDto.Email);
+            
+            if (string.IsNullOrEmpty(sanitizedEmail) || !_inputSanitizationService.IsValidEmail(sanitizedEmail))
+            {
+                _logger.LogWarning("Invalid email format in login attempt: {Email}", loginDto.Email);
+                return null;
+            }
+
+            // Check for injection patterns
+            if (_inputSanitizationService.ContainsSqlInjectionPatterns(loginDto.Email) ||
+                _inputSanitizationService.ContainsSqlInjectionPatterns(loginDto.Password))
+            {
+                _logger.LogWarning("Potential injection attack detected in login attempt for email: {Email}", sanitizedEmail);
+                return null;
+            }
+
+            var user = await _context.Users
+                .FirstOrDefaultAsync(u => u.Email == sanitizedEmail && u.IsActive);
+
+            if (user == null || !BCrypt.Net.BCrypt.Verify(loginDto.Password, user.PasswordHash))
+            {
+                // Log failed login attempt
+                _logger.LogWarning("Failed login attempt for email: {Email}", sanitizedEmail);
+                return null;
+            }
+
+            _logger.LogInformation("Successful login for user: {UserId}", user.Id);
+            return _jwtService.GenerateToken(user);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during login for email: {Email}", loginDto.Email);
             return null;
         }
-
-        return GenerateJwtToken(user);
     }
 
     public async Task<User?> RegisterAsync(RegisterDto registerDto)
     {
-        if (await _context.Users.AnyAsync(u => u.Email == registerDto.Email))
+        try
         {
+            // Sanitize and validate input
+            var sanitizedEmail = _inputSanitizationService.SanitizeEmail(registerDto.Email);
+            var sanitizedUsername = _inputSanitizationService.SanitizeUsername(registerDto.Username);
+            
+            if (string.IsNullOrEmpty(sanitizedEmail) || !_inputSanitizationService.IsValidEmail(sanitizedEmail))
+            {
+                _logger.LogWarning("Invalid email format in registration attempt: {Email}", registerDto.Email);
+                return null;
+            }
+
+            if (string.IsNullOrEmpty(sanitizedUsername) || !_inputSanitizationService.IsValidUsername(sanitizedUsername))
+            {
+                _logger.LogWarning("Invalid username format in registration attempt: {Username}", registerDto.Username);
+                return null;
+            }
+
+            // Check for injection patterns
+            if (_inputSanitizationService.ContainsSqlInjectionPatterns(registerDto.Email) ||
+                _inputSanitizationService.ContainsSqlInjectionPatterns(registerDto.Username) ||
+                _inputSanitizationService.ContainsSqlInjectionPatterns(registerDto.Password))
+            {
+                _logger.LogWarning("Potential injection attack detected in registration attempt for email: {Email}", sanitizedEmail);
+                return null;
+            }
+
+            // Check for existing users
+            if (await _context.Users.AnyAsync(u => u.Email == sanitizedEmail))
+            {
+                _logger.LogInformation("Registration attempt with existing email: {Email}", sanitizedEmail);
+                return null;
+            }
+
+            if (await _context.Users.AnyAsync(u => u.Username == sanitizedUsername))
+            {
+                _logger.LogInformation("Registration attempt with existing username: {Username}", sanitizedUsername);
+                return null;
+            }
+
+            var user = new User
+            {
+                Username = sanitizedUsername,
+                Email = sanitizedEmail,
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(registerDto.Password),
+                CreatedAt = DateTime.UtcNow,
+                IsActive = true
+            };
+
+            _context.Users.Add(user);
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("New user registered successfully: {UserId}, Username: {Username}", user.Id, sanitizedUsername);
+            return user;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during user registration for email: {Email}", registerDto.Email);
             return null;
         }
-
-        if (await _context.Users.AnyAsync(u => u.Username == registerDto.Username))
-        {
-            return null;
-        }
-
-        var user = new User
-        {
-            Username = registerDto.Username,
-            Email = registerDto.Email,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(registerDto.Password),
-            CreatedAt = DateTime.UtcNow,
-            IsActive = true
-        };
-
-        _context.Users.Add(user);
-        await _context.SaveChangesAsync();
-
-        return user;
     }
 
     public async Task<User?> GetUserByIdAsync(int userId)
@@ -74,26 +142,4 @@ public class AuthService : IAuthService
             .FirstOrDefaultAsync(u => u.Email == email && u.IsActive);
     }
 
-    private string GenerateJwtToken(User user)
-    {
-        var tokenHandler = new JwtSecurityTokenHandler();
-        var key = Encoding.ASCII.GetBytes(_jwtSettings.SecretKey);
-
-        var tokenDescriptor = new SecurityTokenDescriptor
-        {
-            Subject = new ClaimsIdentity(new[]
-            {
-                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-                new Claim(ClaimTypes.Email, user.Email),
-                new Claim(ClaimTypes.Name, user.Username)
-            }),
-            Expires = DateTime.UtcNow.AddHours(_jwtSettings.ExpirationInHours),
-            Issuer = _jwtSettings.Issuer,
-            Audience = _jwtSettings.Audience,
-            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
-        };
-
-        var token = tokenHandler.CreateToken(tokenDescriptor);
-        return tokenHandler.WriteToken(token);
-    }
 }

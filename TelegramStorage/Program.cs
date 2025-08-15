@@ -12,55 +12,101 @@ using TelegramStorage.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configurar limites globais no builder
+// Load security settings first
+var securitySettings = new SecuritySettings();
+builder.Configuration.GetSection("SecuritySettings").Bind(securitySettings);
+builder.Services.AddSingleton(securitySettings);
+
+// Configure secure file upload limits
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.Limits.MaxRequestBodySize = null;
-    options.Limits.MinRequestBodyDataRate = null;
-    options.Limits.MinResponseDataRate = null;
-    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(30);
-    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(30);
+    // Set reasonable limits instead of unlimited
+    options.Limits.MaxRequestBodySize = securitySettings.FileUpload.MaxFileSizeBytes;
+    options.Limits.MinRequestBodyDataRate = new MinDataRate(100, TimeSpan.FromSeconds(10));
+    options.Limits.MinResponseDataRate = new MinDataRate(100, TimeSpan.FromSeconds(10));
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(1);
+    options.Limits.MaxConcurrentConnections = 100;
+    options.Limits.MaxConcurrentUpgradedConnections = 100;
 });
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Configurar limites para arquivos grandes
+// Add memory cache for rate limiting
+builder.Services.AddMemoryCache();
+
+// Configure secure file upload options
 builder.Services.Configure<IISServerOptions>(options =>
 {
-    options.MaxRequestBodySize = null; // Sem limite
+    options.MaxRequestBodySize = securitySettings.FileUpload.MaxFileSizeBytes;
 });
 
 builder.Services.Configure<KestrelServerOptions>(options =>
 {
-    options.Limits.MaxRequestBodySize = null; // Sem limite
-    options.Limits.MinRequestBodyDataRate = null;
-    options.Limits.MinResponseDataRate = null;
-    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(30);
-    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(30);
+    options.Limits.MaxRequestBodySize = securitySettings.FileUpload.MaxFileSizeBytes;
+    options.Limits.MinRequestBodyDataRate = new MinDataRate(100, TimeSpan.FromSeconds(10));
+    options.Limits.MinResponseDataRate = new MinDataRate(100, TimeSpan.FromSeconds(10));
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(1);
 });
 
 builder.Services.Configure<FormOptions>(options =>
 {
-    options.ValueLengthLimit = int.MaxValue;
-    options.MultipartBodyLengthLimit = long.MaxValue;
-    options.MultipartHeadersLengthLimit = int.MaxValue;
-    options.MultipartBoundaryLengthLimit = int.MaxValue;
-    options.BufferBodyLengthLimit = long.MaxValue;
-    options.MemoryBufferThreshold = int.MaxValue;
+    // Secure form options with reasonable limits
+    options.ValueLengthLimit = 1024 * 1024; // 1MB for form values
+    options.MultipartBodyLengthLimit = securitySettings.FileUpload.MaxFileSizeBytes;
+    options.MultipartHeadersLengthLimit = 16384; // 16KB for headers
+    options.MultipartBoundaryLengthLimit = 128; // 128 bytes for boundary
+    options.BufferBodyLengthLimit = securitySettings.FileUpload.MaxFileSizeBytes;
+    options.MemoryBufferThreshold = 65536; // 64KB memory threshold
 });
 
+// Validate and log configuration status
+SecretsManager.ValidateRequiredSecrets(builder.Services.BuildServiceProvider().GetRequiredService<ILogger<Program>>());
+SecretsManager.LogConfigurationStatus(builder.Services.BuildServiceProvider().GetRequiredService<ILogger<Program>>(), builder.Configuration);
+
+// Configure database with secure connection string
+var connectionString = SecretsManager.GetSecret(
+    "DATABASE_CONNECTION_STRING", 
+    "ConnectionStrings:DefaultConnection", 
+    builder.Configuration);
+
 builder.Services.AddDbContext<TelegramStorageContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseNpgsql(connectionString));
 
 var jwtSettings = new JwtSettings();
 builder.Configuration.GetSection("JwtSettings").Bind(jwtSettings);
 builder.Services.AddSingleton(jwtSettings);
 
+// Configure Telegram settings with secure secrets
 var telegramSettings = new TelegramSettings();
 builder.Configuration.GetSection("TelegramSettings").Bind(telegramSettings);
+
+// Override with environment variables if present
+var botToken = SecretsManager.GetSecret(
+    "TELEGRAM_BOT_TOKEN", 
+    "TelegramSettings:BotToken", 
+    builder.Configuration);
+telegramSettings.BotToken = botToken;
+
+var storageChatId = SecretsManager.GetSecret(
+    "TELEGRAM_STORAGE_CHAT_ID", 
+    "TelegramSettings:StorageChatId", 
+    builder.Configuration);
+telegramSettings.StorageChatId = storageChatId;
+
 builder.Services.AddSingleton(telegramSettings);
+
+// Configure JWT with secure key management
+builder.Services.AddScoped<IJwtService, JwtService>();
+
+// Get secure JWT key from environment variables
+var secureKey = SecretsManager.GetSecret(
+    "JWT_SECRET_KEY", 
+    "JwtSettings:SecretKey", 
+    builder.Configuration);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -68,16 +114,21 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.ASCII.GetBytes(jwtSettings.SecretKey)),
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secureKey)),
             ValidateIssuer = true,
             ValidIssuer = jwtSettings.Issuer,
             ValidateAudience = true,
             ValidAudience = jwtSettings.Audience,
             ValidateLifetime = true,
-            ClockSkew = TimeSpan.Zero
+            ClockSkew = TimeSpan.Zero,
+            RequireExpirationTime = true,
+            RequireSignedTokens = true
         };
     });
 
+// Add security services
+builder.Services.AddScoped<IInputSanitizationService, InputSanitizationService>();
+builder.Services.AddScoped<IFileValidationService, FileValidationService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<ITelegramService, TelegramService>();
 builder.Services.AddScoped<IFileService, FileService>();
@@ -90,15 +141,26 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseMiddleware<ExceptionMiddleware>();
+// Security middleware pipeline
+app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseMiddleware<RateLimitingMiddleware>();
+app.UseMiddleware<SecureExceptionMiddleware>();
 
-// Configurar formulários para arquivos grandes
+// Configure request body size based on endpoint
 app.Use(async (context, next) =>
 {
     var maxRequestBodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
     if (maxRequestBodySizeFeature != null)
     {
-        maxRequestBodySizeFeature.MaxRequestBodySize = null;
+        // Only allow large requests for file upload endpoints
+        if (context.Request.Path.StartsWithSegments("/api/files/upload"))
+        {
+            maxRequestBodySizeFeature.MaxRequestBodySize = securitySettings.FileUpload.MaxFileSizeBytes;
+        }
+        else
+        {
+            maxRequestBodySizeFeature.MaxRequestBodySize = 1024 * 1024; // 1MB for other endpoints
+        }
     }
     await next();
 });

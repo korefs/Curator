@@ -18,8 +18,6 @@ public class FilesController : ControllerBase
     }
 
     [HttpPost("upload")]
-    [RequestSizeLimit(long.MaxValue)]
-    [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue)]
     public async Task<IActionResult> UploadFile(IFormFile file)
     {
         if (file == null || file.Length == 0)
@@ -30,16 +28,32 @@ public class FilesController : ControllerBase
         var userId = GetCurrentUserId();
         if (userId == null)
         {
-            return Unauthorized();
+            return Unauthorized(new { message = "Authentication required" });
         }
 
-        var result = await _fileService.UploadFileAsync(file, userId.Value);
-        if (result == null)
+        try
         {
-            return BadRequest(new { message = "Failed to upload file" });
-        }
+            var result = await _fileService.UploadFileAsync(file, userId.Value);
+            if (result == null)
+            {
+                return BadRequest(new { message = "File upload failed. Please check file requirements and try again." });
+            }
 
-        return Ok(result);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Unauthorized(new { message = "Insufficient permissions" });
+        }
+        catch (Exception)
+        {
+            // Let the SecureExceptionMiddleware handle unexpected exceptions
+            throw;
+        }
     }
 
     [HttpGet]

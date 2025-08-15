@@ -9,15 +9,18 @@ public class FileService : IFileService
 {
     private readonly TelegramStorageContext _context;
     private readonly ITelegramService _telegramService;
+    private readonly IFileValidationService _fileValidationService;
     private readonly ILogger<FileService> _logger;
 
     public FileService(
         TelegramStorageContext context, 
-        ITelegramService telegramService, 
+        ITelegramService telegramService,
+        IFileValidationService fileValidationService,
         ILogger<FileService> logger)
     {
         _context = context;
         _telegramService = telegramService;
+        _fileValidationService = fileValidationService;
         _logger = logger;
     }
 
@@ -25,16 +28,28 @@ public class FileService : IFileService
     {
         try
         {
+            // Validate file first
+            var validationResult = await _fileValidationService.ValidateFileAsync(file, userId);
+            if (!validationResult.IsValid)
+            {
+                _logger.LogWarning("File validation failed for user {UserId}: {Errors}", 
+                    userId, string.Join(", ", validationResult.Errors));
+                return null;
+            }
+
             using var stream = file.OpenReadStream();
+            
+            // Use sanitized filename
+            var sanitizedFileName = validationResult.SanitizedFileName ?? file.FileName;
             
             // Verifica se precisa fazer chunking
             if (FileChunkingService.ShouldChunk(file.Length))
             {
-                return await UploadLargeFileAsync(file, stream, userId);
+                return await UploadLargeFileAsync(file, stream, userId, sanitizedFileName);
             }
             else
             {
-                return await UploadSmallFileAsync(file, stream, userId);
+                return await UploadSmallFileAsync(file, stream, userId, sanitizedFileName);
             }
         }
         catch (Exception ex)
@@ -44,10 +59,10 @@ public class FileService : IFileService
         }
     }
 
-    private async Task<FileResponseDto?> UploadSmallFileAsync(IFormFile file, Stream stream, int userId)
+    private async Task<FileResponseDto?> UploadSmallFileAsync(IFormFile file, Stream stream, int userId, string sanitizedFileName)
     {
         var telegramFileId = await _telegramService.UploadFileAsync(
-            stream, file.FileName, file.ContentType);
+            stream, sanitizedFileName, file.ContentType);
 
         if (telegramFileId == null)
         {
@@ -57,7 +72,7 @@ public class FileService : IFileService
 
         var fileRecord = new FileRecord
         {
-            OriginalFileName = file.FileName,
+            OriginalFileName = sanitizedFileName,
             ContentType = file.ContentType,
             FileSize = file.Length,
             TelegramFileId = telegramFileId,
@@ -84,14 +99,14 @@ public class FileService : IFileService
         };
     }
 
-    private async Task<FileResponseDto?> UploadLargeFileAsync(IFormFile file, Stream stream, int userId)
+    private async Task<FileResponseDto?> UploadLargeFileAsync(IFormFile file, Stream stream, int userId, string sanitizedFileName)
     {
         var totalChunks = FileChunkingService.CalculateChunkCount(file.Length);
         
         // Cria o registro do arquivo
         var fileRecord = new FileRecord
         {
-            OriginalFileName = file.FileName,
+            OriginalFileName = sanitizedFileName,
             ContentType = file.ContentType,
             FileSize = file.Length,
             TelegramFileId = string.Empty, // Será preenchido depois

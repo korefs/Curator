@@ -21,18 +21,32 @@ public class TelegramService : ITelegramService
     {
         try
         {
-            if (_telegramSettings.AllowedContentTypes.Length > 0 && 
-                !_telegramSettings.AllowedContentTypes.Contains(contentType))
+            // Validate content type
+            if (_telegramSettings.AllowedContentTypes.Length > 0)
             {
-                _logger.LogWarning("Content type not allowed: {ContentType}", contentType);
-                return null;
+                var isAllowed = _telegramSettings.AllowedContentTypes.Any(allowedType =>
+                {
+                    if (allowedType.EndsWith("/*"))
+                    {
+                        // Handle wildcard content types (e.g., "video/*")
+                        var baseType = allowedType.Substring(0, allowedType.Length - 2);
+                        return contentType.StartsWith(baseType + "/", StringComparison.OrdinalIgnoreCase);
+                    }
+                    return string.Equals(allowedType, contentType, StringComparison.OrdinalIgnoreCase);
+                });
+
+                if (!isAllowed)
+                {
+                    _logger.LogWarning("Content type not allowed: {ContentType}", contentType);
+                    return null;
+                }
             }
 
             var inputFile = InputFile.FromStream(fileStream, fileName);
             var message = await _botClient.SendDocumentAsync(
                 chatId: _telegramSettings.StorageChatId,
                 document: inputFile,
-                caption: $"📁 {fileName}\n🕒 {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC"
+                caption: $"📝 {fileName}\n🕒 {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC"
             );
 
             if (message.Document != null)
